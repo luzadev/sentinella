@@ -1,0 +1,10 @@
+# Lista degli agent da aggiornare con deploy/update-agents.sh
+# Formato:  <ssh_target> <dir_repo_agent>
+# Copia questo file in agents.txt e inserisci i tuoi host reali (agents.txt è gitignorato).
+
+# Server che ospita anche il control plane (agent nello stesso repo, utente non-root → usa sudo):
+sentinella@host.tld        /home/sentinella/sentinella
+
+# Agent standalone (root, repo in /opt/sentinella-agent):
+root@web-01                /opt/sentinella-agent
+root@web-02                /opt/sentinella-agent
