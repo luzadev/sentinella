@@ -196,17 +196,27 @@ _SERVICE_SUBDOMAINS = ("mail.", "webmail.", "admin.", "autoconfig.", "autodiscov
 
 def _parse_proxies(txt: str) -> list[dict]:
     """Estrae i reverse proxy da un vhost: ProxyPass e RewriteRule con flag [P]."""
+    def clean(tok):
+        return tok.strip().strip('"').strip("'")
+
     proxies = []
     for m in re.finditer(r"^\s*ProxyPass\s+(\S+)\s+(\S+)", txt, re.M | re.I):
-        path, target = m.group(1), m.group(2)
+        path, target = clean(m.group(1)), clean(m.group(2))
         if target == "!":  # esclusione (es. ProxyPass /.well-known !), non è un proxy
             continue
         proxies.append({"path": path, "target": target, "kind": "ProxyPass"})
     for m in re.finditer(r"^\s*RewriteRule\s+(\S+)\s+(\S+)\s+\[([^\]]*)\]", txt, re.M | re.I):
         flags = {f.strip().upper() for f in m.group(3).split(",")}
         if "P" in flags:  # [P] = proxy
-            proxies.append({"path": m.group(1), "target": m.group(2), "kind": "RewriteRule [P]"})
-    return proxies
+            proxies.append({"path": clean(m.group(1)), "target": clean(m.group(2)), "kind": "RewriteRule [P]"})
+    # dedup (le stesse direttive compaiono nei blocchi :80 e :443)
+    seen, uniq = set(), []
+    for p in proxies:
+        key = (p["path"], p["target"], p["kind"])
+        if key not in seen:
+            seen.add(key)
+            uniq.append(p)
+    return uniq
 
 
 def _discover_vhosts() -> dict:
