@@ -13,20 +13,34 @@ Config via environment variables (or a .env-style file passed as $1):
   SENTINELLA_NAME         friendly server name (default: hostname)
   SENTINELLA_INTERVAL     heartbeat seconds (default 15)
   SENTINELLA_SERVICES     comma-separated systemd units to watch (optional)
+  SENTINELLA_TLS_DOMAINS  comma-separated domains[:port] for extra SSL checks (optional)
 """
 import json
 import os
 import platform
+import re
 import shlex
+import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from glob import glob
 from pathlib import Path
 
 import httpx
 import psutil
+
+# Servizi noti da rilevare automaticamente se presenti sull'host
+COMMON_SERVICES = [
+    "apache2", "httpd", "nginx", "mariadb", "mysql", "mysqld", "postgresql",
+    "redis-server", "redis", "docker", "ssh", "sshd", "cron", "crond",
+    "postfix", "dovecot", "named", "bind9", "fail2ban", "ufw", "webmin",
+    "php8.1-fpm", "php8.2-fpm", "php8.3-fpm", "php8.4-fpm",
+    "sentinella", "sentinella-agent",
+]
 
 
 def log(msg: str) -> None:
@@ -49,8 +63,50 @@ class Config:
         self.name = os.environ.get("SENTINELLA_NAME", socket.gethostname())
         self.interval = int(os.environ.get("SENTINELLA_INTERVAL", "15"))
         self.services = [s.strip() for s in os.environ.get("SENTINELLA_SERVICES", "").split(",") if s.strip()]
+        self.tls_domains = [s.strip() for s in os.environ.get("SENTINELLA_TLS_DOMAINS", "").split(",") if s.strip()]
         # resolved here (not at import) so an env file passed on the CLI is honored
         self.state_file = Path(os.environ.get("SENTINELLA_STATE", "/var/lib/sentinella/agent.json"))
+
+
+_public_ip_cache = None
+
+
+def primary_ip() -> str:
+    """IP locale usato per uscire verso l'esterno (nessun pacchetto inviato)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def all_ipv4() -> list[dict]:
+    """Tutti gli IPv4 non-loopback per interfaccia."""
+    out = []
+    for iface, addrs in psutil.net_if_addrs().items():
+        for a in addrs:
+            if a.family == socket.AF_INET and not a.address.startswith("127."):
+                out.append({"iface": iface, "ip": a.address})
+    return out
+
+
+def public_ip() -> str:
+    """IP pubblico, risolto una volta e poi messo in cache."""
+    global _public_ip_cache
+    if _public_ip_cache is not None:
+        return _public_ip_cache
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            _public_ip_cache = httpx.get(url, timeout=5).text.strip()
+            if _public_ip_cache:
+                return _public_ip_cache
+        except Exception:  # noqa: BLE001
+            continue
+    _public_ip_cache = ""
+    return _public_ip_cache
 
 
 def os_info() -> dict:
@@ -61,6 +117,9 @@ def os_info() -> dict:
         "python": platform.python_version(),
         "cpu_count": psutil.cpu_count(),
         "total_mem_gb": round(psutil.virtual_memory().total / 1e9, 2),
+        "ip_local": primary_ip(),
+        "ips": all_ipv4(),
+        "ip_public": public_ip(),
     }
 
 
@@ -73,15 +132,118 @@ def _distro() -> str:
     return platform.platform()
 
 
-def service_states(units: list[str]) -> dict:
+def _existing_units() -> set:
+    """Unit di servizio realmente installate sull'host (per non riportare unit inesistenti)."""
+    try:
+        out = subprocess.run(
+            ["systemctl", "list-unit-files", "--type=service", "--no-legend", "--plain"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return set()
+    units = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[0].endswith(".service"):
+            units.add(parts[0][: -len(".service")])
+    return units
+
+
+def detect_services(extra_units: list[str]) -> dict:
+    """Stato (active/inactive/failed) dei servizi noti presenti + quelli configurati."""
+    existing = _existing_units()
+    wanted = list(dict.fromkeys(COMMON_SERVICES + list(extra_units)))  # dedup, ordine stabile
     out = {}
-    for unit in units:
+    for unit in wanted:
+        if existing and unit not in existing:
+            continue
         try:
-            r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=10)
-            out[unit] = r.stdout.strip() or r.stderr.strip()
-        except Exception as e:  # noqa: BLE001
-            out[unit] = f"error: {e}"
+            r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=8)
+            out[unit] = r.stdout.strip() or "unknown"
+        except Exception:  # noqa: BLE001
+            out[unit] = "unknown"
     return out
+
+
+def _check_cert(host: str, port: int = 443) -> dict:
+    """Handshake TLS: ritorna validità, giorni alla scadenza, emittente."""
+    info = {"valid": None, "days_left": None, "not_after": "", "issuer": "", "error": ""}
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=8) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ss:
+                cert = ss.getpeercert()
+        info["not_after"] = cert.get("notAfter", "")
+        info["days_left"] = int((ssl.cert_time_to_seconds(cert["notAfter"]) - time.time()) // 86400)
+        info["issuer"] = dict(x[0] for x in cert.get("issuer", ())).get("organizationName", "")
+        info["valid"] = True
+    except ssl.SSLCertVerificationError as e:
+        # certificato presente ma non valido (scaduto/hostname errato/self-signed) → urgente
+        info["valid"] = False
+        info["days_left"] = -1
+        info["error"] = getattr(e, "verify_message", None) or str(e)
+    except Exception as e:  # noqa: BLE001 - host irraggiungibile / no TLS: non è un problema di cert
+        info["error"] = str(e)
+    return info
+
+
+def _discover_vhosts() -> dict:
+    """Domini (ServerName) e relative porte dai vhost Apache. Best-effort, senza root."""
+    names: dict[str, set] = {}
+    conf_dirs = ["/etc/apache2/sites-enabled", "/etc/httpd/conf.d", "/etc/apache2/vhosts.d"]
+    for d in conf_dirs:
+        if not os.path.isdir(d):
+            continue
+        for f in glob(os.path.join(d, "*.conf")):
+            try:
+                txt = open(f, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+            ports = {int(p) for p in re.findall(r"<VirtualHost[^>]*:(\d+)", txt, re.I)}
+            for sn in re.findall(r"^\s*ServerName\s+(\S+)", txt, re.M | re.I):
+                names.setdefault(sn, set()).update(ports or {80})
+    return names
+
+
+def virtual_hosts(extra_domains: list[str]) -> list[dict]:
+    """Elenco dei virtual host con stato e certificato SSL."""
+    domains = _discover_vhosts()
+    for d in extra_domains:
+        host, _, p = d.partition(":")
+        domains.setdefault(host, set()).add(int(p) if p else 443)
+    result = []
+    for name in sorted(domains):
+        if "." not in name or name.startswith("*"):
+            continue
+        ports = sorted(domains[name])
+        entry = {"domain": name, "ports": ports, "active": True,
+                 "ssl_valid": None, "ssl_days_left": None, "ssl_not_after": "", "issuer": "", "error": ""}
+        if 443 in ports:
+            c = _check_cert(name, 443)
+            entry.update(ssl_valid=c["valid"], ssl_days_left=c["days_left"],
+                         ssl_not_after=c["not_after"], issuer=c["issuer"], error=c["error"])
+        result.append(entry)
+    return result
+
+
+def listening_ports() -> list[dict]:
+    """Porte TCP in ascolto, col processo se accessibile."""
+    ports: dict[int, str] = {}
+    try:
+        for c in psutil.net_connections(kind="inet"):
+            if c.status != psutil.CONN_LISTEN or not c.laddr:
+                continue
+            name = "?"
+            if c.pid:
+                try:
+                    name = psutil.Process(c.pid).name()
+                except Exception:  # noqa: BLE001
+                    name = "?"
+            if c.laddr.port not in ports or ports[c.laddr.port] == "?":
+                ports[c.laddr.port] = name
+    except Exception:  # noqa: BLE001
+        return []
+    return [{"port": p, "process": ports[p]} for p in sorted(ports)]
 
 
 def top_processes(n: int = 5) -> list[dict]:
@@ -110,6 +272,9 @@ def collect_metric(cfg: Config) -> dict:
             per_disk[part.mountpoint] = round(u.percent, 1)
         except (PermissionError, OSError):
             continue
+    vhosts = virtual_hosts(cfg.tls_domains)
+    cert_days = [v["ssl_days_left"] for v in vhosts if v.get("ssl_days_left") is not None]
+    cert_min = float(min(cert_days)) if cert_days else 9999.0
     return {
         "cpu_percent": round(psutil.cpu_percent(interval=None), 1),
         "mem_percent": round(vm.percent, 1),
@@ -119,9 +284,12 @@ def collect_metric(cfg: Config) -> dict:
         "net_sent": net.bytes_sent, "net_recv": net.bytes_recv,
         "uptime_seconds": int(time.time() - psutil.boot_time()),
         "process_count": len(psutil.pids()),
+        "cert_min_days_left": cert_min,
         "extra": {
             "per_disk": per_disk,
-            "services": service_states(cfg.services),
+            "services": detect_services(cfg.services),
+            "vhosts": vhosts,
+            "listen_ports": listening_ports(),
             "top_processes": top_processes(),
         },
     }

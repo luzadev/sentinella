@@ -14,6 +14,8 @@ DEFAULT_RULES = [
          duration_seconds=180, severity="warning"),
     dict(name="Load medio elevato", metric="load5", operator=">", threshold=8,
          duration_seconds=180, severity="warning"),
+    dict(name="Certificato SSL in scadenza", metric="cert_min_days_left", operator="<",
+         threshold=14, duration_seconds=0, severity="warning"),
 ]
 
 

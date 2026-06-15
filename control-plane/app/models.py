@@ -77,7 +77,9 @@ class Metric(SQLModel, table=True):
     net_recv: int = Field(default=0, sa_type=BigInteger)
     uptime_seconds: int = Field(default=0, sa_type=BigInteger)
     process_count: int = 0
-    # per-disk usage, top processes, service states, etc.
+    # giorni mancanti alla scadenza del certificato SSL più "vicino" (9999 = nessun cert)
+    cert_min_days_left: float = 9999
+    # per-disk usage, top processes, service states, certificati, porte, ecc.
     extra: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 

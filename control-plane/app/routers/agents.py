@@ -49,7 +49,7 @@ async def heartbeat(
         cpu_percent=m.cpu_percent, mem_percent=m.mem_percent, swap_percent=m.swap_percent,
         disk_percent=m.disk_percent, load1=m.load1, load5=m.load5, load15=m.load15,
         net_sent=m.net_sent, net_recv=m.net_recv, uptime_seconds=m.uptime_seconds,
-        process_count=m.process_count, extra=m.extra,
+        process_count=m.process_count, cert_min_days_left=m.cert_min_days_left, extra=m.extra,
     )
     server.last_seen = utcnow()
     server.status = "online"

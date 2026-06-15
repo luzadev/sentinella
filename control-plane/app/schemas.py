@@ -29,6 +29,7 @@ class MetricIn(BaseModel):
     net_recv: int = 0
     uptime_seconds: int = 0
     process_count: int = 0
+    cert_min_days_left: float = 9999
     extra: dict = {}
 
 
