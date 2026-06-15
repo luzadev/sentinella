@@ -28,8 +28,6 @@ from pathlib import Path
 import httpx
 import psutil
 
-STATE_FILE = Path(os.environ.get("SENTINELLA_STATE", "/var/lib/sentinella/agent.json"))
-
 
 def log(msg: str) -> None:
     print(f"{datetime.now(timezone.utc).isoformat()} {msg}", flush=True)
@@ -51,6 +49,8 @@ class Config:
         self.name = os.environ.get("SENTINELLA_NAME", socket.gethostname())
         self.interval = int(os.environ.get("SENTINELLA_INTERVAL", "15"))
         self.services = [s.strip() for s in os.environ.get("SENTINELLA_SERVICES", "").split(",") if s.strip()]
+        # resolved here (not at import) so an env file passed on the CLI is honored
+        self.state_file = Path(os.environ.get("SENTINELLA_STATE", "/var/lib/sentinella/agent.json"))
 
 
 def os_info() -> dict:
@@ -128,8 +128,9 @@ def collect_metric(cfg: Config) -> dict:
 
 
 def enroll(cfg: Config) -> str:
-    if STATE_FILE.exists():
-        token = json.loads(STATE_FILE.read_text()).get("agent_token")
+    state_file = cfg.state_file
+    if state_file.exists():
+        token = json.loads(state_file.read_text()).get("agent_token")
         if token:
             return token
     log(f"Enrollment con {cfg.url} come '{cfg.name}'...")
@@ -141,8 +142,8 @@ def enroll(cfg: Config) -> str:
     )
     r.raise_for_status()
     token = r.json()["agent_token"]
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps({"agent_token": token}))
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    state_file.write_text(json.dumps({"agent_token": token}))
     log("Enrollment riuscito.")
     return token
 
