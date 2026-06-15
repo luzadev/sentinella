@@ -1,0 +1,18 @@
+[Unit]
+Description=Sentinella Agent — telemetria e remediation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adatta i percorsi alla tua installazione
+WorkingDirectory=/opt/sentinella-agent
+ExecStart=/opt/sentinella-agent/venv/bin/python /opt/sentinella-agent/agent.py /opt/sentinella-agent/agent.env
+Restart=always
+RestartSec=10
+# L'agent esegue comandi di remediation: serve privilegio adeguato.
+# Valuta un utente dedicato con sudoers mirato invece di root.
+User=root
+
+[Install]
+WantedBy=multi-user.target

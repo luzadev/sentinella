@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Env / secrets
+.env
+control-plane/.env
+agent/agent.env
+
+# Database
+*.db
+*.sqlite3
+
+# Node / frontend build
+node_modules/
+control-plane/static/
+
+# Agent state
+agent.json
+
+# OS
+.DS_Store

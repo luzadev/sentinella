@@ -1,0 +1,15 @@
+services:
+  control-plane:
+    build: ./control-plane
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./control-plane/.env
+    volumes:
+      - sentinella-data:/app/data
+    environment:
+      SENTINELLA_DATABASE_URL: sqlite:////app/data/sentinella.db
+    restart: unless-stopped
+
+volumes:
+  sentinella-data:
