@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from sqlalchemy import BigInteger
 from sqlmodel import Field, SQLModel, Column, JSON
 
 
@@ -72,9 +73,9 @@ class Metric(SQLModel, table=True):
     load1: float = 0
     load5: float = 0
     load15: float = 0
-    net_sent: int = 0
-    net_recv: int = 0
-    uptime_seconds: int = 0
+    net_sent: int = Field(default=0, sa_type=BigInteger)
+    net_recv: int = Field(default=0, sa_type=BigInteger)
+    uptime_seconds: int = Field(default=0, sa_type=BigInteger)
     process_count: int = 0
     # per-disk usage, top processes, service states, etc.
     extra: dict = Field(default_factory=dict, sa_column=Column(JSON))
