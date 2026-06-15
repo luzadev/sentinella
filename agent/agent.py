@@ -25,6 +25,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from glob import glob
@@ -400,25 +401,65 @@ _PROTECTED_PATHS = {
 }
 
 
-def analyze_disk(path: str, top: int = 100, budget_seconds: int = 120) -> dict:
+def analyze_disk(path: str, top: int = 100, timeout_s: int = 900) -> dict:
     """Occupazione disco dei figli immediati di `path`, ordinati dal più grande.
 
-    Calcolo in Python puro (portabile, indipendente dai flag di `du`); i path non
-    leggibili vengono saltati e c'è un budget di tempo per non bloccare gli heartbeat.
+    Primario: GNU `du` con -x (resta sulla stessa partizione → salta /proc,/sys,/dev
+    e altri mount) e --block-size=1 (byte effettivi su disco, coerenti con `df`).
+    Fallback portabile in Python se `du` non è GNU (es. macOS).
     """
     target = os.path.realpath(path or "/")
     if not os.path.isdir(target):
         return {"entries": [], "error": f"Percorso non valido o non è una cartella: {target}"}
 
+    try:
+        r = subprocess.run(
+            ["du", "-a", "-x", "--block-size=1", "--max-depth=1", target],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+        entries = []
+        for line in r.stdout.splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            try:
+                size = int(parts[0])
+            except ValueError:
+                continue
+            full = parts[1]
+            if os.path.realpath(full) == target:  # riga del totale: la salto
+                continue
+            entries.append({
+                "path": full, "name": os.path.basename(full) or full,
+                "size_bytes": size, "is_dir": os.path.isdir(full),
+            })
+        if entries:
+            entries.sort(key=lambda x: x["size_bytes"], reverse=True)
+            return {"entries": entries[:top], "error": ""}
+    except subprocess.TimeoutExpired:
+        return {"entries": [], "error": "Analisi andata in timeout. Prova un percorso più specifico."}
+    except (FileNotFoundError, OSError):
+        pass  # du assente o non-GNU → fallback Python
+    return _analyze_disk_py(target, top)
+
+
+def _analyze_disk_py(target: str, top: int = 100, budget_seconds: int = 120) -> dict:
+    """Fallback portabile: calcolo in Python restando sulla stessa partizione."""
+    try:
+        base_dev = os.stat(target).st_dev
+    except OSError as e:
+        return {"entries": [], "error": str(e)}
     deadline = time.time() + budget_seconds
     truncated = {"v": False}
 
     def tree_size(p: str) -> int:
         total = 0
-        for root, _dirs, files in os.walk(p, onerror=lambda e: None):
+        for root, dirs, files in os.walk(p, onerror=lambda e: None):
             if time.time() > deadline:
                 truncated["v"] = True
                 break
+            # non scendere in altri filesystem (mount diversi, fs virtuali)
+            dirs[:] = [d for d in dirs if _same_dev(os.path.join(root, d), base_dev)]
             for f in files:
                 try:
                     total += os.lstat(os.path.join(root, f)).st_size
@@ -435,7 +476,7 @@ def analyze_disk(path: str, top: int = 100, budget_seconds: int = 120) -> dict:
                     if de.is_symlink():
                         size = 0
                     elif is_dir:
-                        size = tree_size(de.path)
+                        size = tree_size(de.path) if _same_dev(de.path, base_dev) else 0
                     else:
                         size = de.stat(follow_symlinks=False).st_size
                 except OSError:
@@ -454,6 +495,13 @@ def analyze_disk(path: str, top: int = 100, budget_seconds: int = 120) -> dict:
     elif not entries:
         err = "Nessuna voce leggibile in questo percorso"
     return {"entries": entries[:top], "error": err}
+
+
+def _same_dev(path: str, base_dev: int) -> bool:
+    try:
+        return os.lstat(path).st_dev == base_dev
+    except OSError:
+        return False
 
 
 def safe_delete(path: str) -> tuple[int, str]:
@@ -478,6 +526,16 @@ def execute_action(action: dict) -> tuple[int, str]:
     if action.get("kind") == "delete_path":
         return safe_delete(action["command"])
     return run_command(action["command"])
+
+
+def _run_disk_scan(cfg: Config, token: str, scan: dict) -> None:
+    """Esegue una scansione disco e ne riporta l'esito (in un thread separato)."""
+    result = analyze_disk(scan["path"])
+    try:
+        with httpx.Client(base_url=cfg.url, headers={"X-Agent-Token": token}, timeout=30) as c:
+            c.post("/api/agents/disk-scan/result", json={"scan_id": scan["scan_id"], **result})
+    except httpx.HTTPError as e:
+        log(f"Invio esito analisi disco #{scan['scan_id']} fallito: {e}")
 
 
 def heartbeat_loop(cfg: Config, token: str) -> None:
@@ -506,9 +564,11 @@ def heartbeat_loop(cfg: Config, token: str) -> None:
                 client.post("/api/agents/backups/result", json={"run_id": backup["run_id"], **result})
 
             for scan in data.get("pending_disk_scans", []):
-                log(f"Analisi disco #{scan['scan_id']}: {scan['path']}")
-                result = analyze_disk(scan["path"])
-                client.post("/api/agents/disk-scan/result", json={"scan_id": scan["scan_id"], **result})
+                # in un thread: una scansione grande (es. /var) non deve bloccare gli heartbeat
+                log(f"Analisi disco #{scan['scan_id']}: {scan['path']} (in background)")
+                threading.Thread(
+                    target=_run_disk_scan, args=(cfg, token, scan), daemon=True,
+                ).start()
 
         except httpx.HTTPError as e:
             log(f"Heartbeat errore: {e}")
