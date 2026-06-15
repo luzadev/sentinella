@@ -6,6 +6,7 @@ the chat. No public webhook required.
 """
 import asyncio
 import logging
+from html import escape as h
 
 import httpx
 from sqlmodel import Session
@@ -37,24 +38,32 @@ async def send_message(text: str, reply_markup: dict | None = None, chat_id: str
     url = API.format(token=settings.telegram_bot_token, method="sendMessage")
     async with httpx.AsyncClient(timeout=15) as client:
         try:
-            await client.post(url, json=payload)
+            resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                # non far fallire silenziosamente: logga il motivo (es. parse HTML)
+                log.warning("Telegram sendMessage %s: %s", resp.status_code, resp.text[:300])
         except httpx.HTTPError as e:
             log.warning("Telegram send failed: %s", e)
 
 
 async def send_alert(alert_title: str, message: str, severity: str) -> None:
     icon = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}.get(severity, "🔔")
-    await send_message(f"{icon} <b>{alert_title}</b>\n{message}")
+    # escape: il testo può contenere < > & (es. "valore < soglia") che romperebbero il parse HTML
+    await send_message(f"{icon} <b>{h(alert_title)}</b>\n{h(message)}")
+
+
+async def send_resolved(alert_title: str) -> None:
+    await send_message(f"✅ <b>Risolto:</b> {h(alert_title)}")
 
 
 async def send_action_for_approval(action: Action, server_name: str) -> None:
     risk_icon = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(action.risk, "🟡")
     text = (
         f"🤖 <b>Remediation proposta dall'AI</b>\n"
-        f"Server: <b>{server_name}</b>\n"
-        f"Rischio: {risk_icon} {action.risk}\n\n"
-        f"<b>Diagnosi:</b>\n{action.ai_reasoning}\n\n"
-        f"<b>Comando proposto:</b>\n<code>{action.command}</code>\n\n"
+        f"Server: <b>{h(server_name)}</b>\n"
+        f"Rischio: {risk_icon} {h(action.risk)}\n\n"
+        f"<b>Diagnosi:</b>\n{h(action.ai_reasoning)}\n\n"
+        f"<b>Comando proposto:</b>\n<code>{h(action.command)}</code>\n\n"
         f"Vuoi eseguirlo?"
     )
     markup = {
@@ -118,7 +127,7 @@ async def poll_updates() -> None:
                         continue
                     msg, _ = _apply_decision(int(raw_id), decision == "approve", who)
                     await _answer_callback(client, cq["id"], msg)
-                    await send_message(f"{msg} (da @{who})")
+                    await send_message(f"{h(msg)} (da @{h(who)})")
             except Exception as e:  # noqa: BLE001 - keep the loop alive
                 log.warning("Telegram poll error: %s", e)
                 await asyncio.sleep(5)

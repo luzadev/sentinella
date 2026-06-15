@@ -73,7 +73,7 @@ async def heartbeat(
         elif note.kind == "action" and note.action is not None:
             await telegram.send_action_for_approval(note.action, note.server_name)
         elif note.kind == "resolved":
-            await telegram.send_message(f"✅ <b>Risolto:</b> {note.alert.title}")
+            await telegram.send_resolved(note.alert.title)
 
     # 4) hand back any approved actions + pending backups for this agent
     pending = session.exec(
