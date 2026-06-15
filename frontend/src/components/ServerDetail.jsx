@@ -100,7 +100,7 @@ export default function ServerDetail({ serverId, onBack }) {
         ) : (
           <table>
             <thead>
-              <tr><th>Dominio</th><th>Porte</th><th>SSL</th><th>Scadenza</th><th>Emittente</th></tr>
+              <tr><th>Dominio</th><th>Porte</th><th>SSL</th><th>Scadenza</th><th>Reverse proxy</th></tr>
             </thead>
             <tbody>
               {vhosts.map((v) => {
@@ -109,13 +109,27 @@ export default function ServerDetail({ serverId, onBack }) {
                 const sslTxt = v.ports?.includes(443)
                   ? (v.ssl_valid === false ? "NON VALIDO" : v.ssl_valid ? "valido" : "—")
                   : "no HTTPS";
+                const proxies = v.proxies || [];
                 return (
                   <tr key={v.domain}>
-                    <td><span className="dot online" /> {v.domain}</td>
+                    <td>
+                      <span className="dot online" />{" "}
+                      <a href={`https://${v.domain}`} target="_blank" rel="noreferrer">{v.domain}</a>
+                    </td>
                     <td className="muted">{(v.ports || []).join(", ")}</td>
-                    <td className={sslCls}>{sslTxt}</td>
-                    <td>{d != null && v.ssl_valid ? `tra ${d} giorni` : (v.error ? <span className="muted" title={v.error}>errore</span> : "—")}</td>
-                    <td className="muted">{v.issuer || "—"}</td>
+                    <td className={sslCls} title={v.error || ""}>{sslTxt}</td>
+                    <td>{d != null && v.ssl_valid ? `tra ${d} giorni` : "—"}</td>
+                    <td>
+                      {proxies.length === 0 ? (
+                        <span className="muted">—</span>
+                      ) : (
+                        proxies.map((p, i) => (
+                          <div key={i} style={{ fontSize: 12, marginBottom: 2 }}>
+                            <code>{p.path}</code> <span className="muted">→</span> <code>{p.target}</code>
+                          </div>
+                        ))
+                      )}
+                    </td>
                   </tr>
                 );
               })}

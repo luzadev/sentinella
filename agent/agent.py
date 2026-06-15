@@ -178,18 +178,40 @@ def _check_cert(host: str, port: int = 443) -> dict:
         info["issuer"] = dict(x[0] for x in cert.get("issuer", ())).get("organizationName", "")
         info["valid"] = True
     except ssl.SSLCertVerificationError as e:
-        # certificato presente ma non valido (scaduto/hostname errato/self-signed) → urgente
         info["valid"] = False
-        info["days_left"] = -1
         info["error"] = getattr(e, "verify_message", None) or str(e)
+        # Solo un certificato scaduto/non ancora valido è "urgente" (days_left=-1 → alert).
+        # Hostname mismatch / self-signed / CA non fidata: segnalati ma NON allarmati
+        # (days_left resta None, escluso dal calcolo di cert_min_days_left).
+        if getattr(e, "verify_code", None) in (10, 9):  # CERT_HAS_EXPIRED / CERT_NOT_YET_VALID
+            info["days_left"] = -1
     except Exception as e:  # noqa: BLE001 - host irraggiungibile / no TLS: non è un problema di cert
         info["error"] = str(e)
     return info
 
 
+# Sottodomini di servizio generati da Virtualmin: non sono siti reali, li escludiamo
+_SERVICE_SUBDOMAINS = ("mail.", "webmail.", "admin.", "autoconfig.", "autodiscover.")
+
+
+def _parse_proxies(txt: str) -> list[dict]:
+    """Estrae i reverse proxy da un vhost: ProxyPass e RewriteRule con flag [P]."""
+    proxies = []
+    for m in re.finditer(r"^\s*ProxyPass\s+(\S+)\s+(\S+)", txt, re.M | re.I):
+        path, target = m.group(1), m.group(2)
+        if target == "!":  # esclusione (es. ProxyPass /.well-known !), non è un proxy
+            continue
+        proxies.append({"path": path, "target": target, "kind": "ProxyPass"})
+    for m in re.finditer(r"^\s*RewriteRule\s+(\S+)\s+(\S+)\s+\[([^\]]*)\]", txt, re.M | re.I):
+        flags = {f.strip().upper() for f in m.group(3).split(",")}
+        if "P" in flags:  # [P] = proxy
+            proxies.append({"path": m.group(1), "target": m.group(2), "kind": "RewriteRule [P]"})
+    return proxies
+
+
 def _discover_vhosts() -> dict:
-    """Domini (ServerName) e relative porte dai vhost Apache. Best-effort, senza root."""
-    names: dict[str, set] = {}
+    """Domini Apache (ServerName) → porte e reverse proxy configurati. Best-effort, senza root."""
+    out: dict[str, dict] = {}
     conf_dirs = ["/etc/apache2/sites-enabled", "/etc/httpd/conf.d", "/etc/apache2/vhosts.d"]
     for d in conf_dirs:
         if not os.path.isdir(d):
@@ -200,23 +222,29 @@ def _discover_vhosts() -> dict:
             except OSError:
                 continue
             ports = {int(p) for p in re.findall(r"<VirtualHost[^>]*:(\d+)", txt, re.I)}
+            proxies = _parse_proxies(txt)
             for sn in re.findall(r"^\s*ServerName\s+(\S+)", txt, re.M | re.I):
-                names.setdefault(sn, set()).update(ports or {80})
-    return names
+                e = out.setdefault(sn, {"ports": set(), "proxies": []})
+                e["ports"].update(ports or {80})
+                e["proxies"] = proxies  # stesso file = stesso virtual server (convenzione Virtualmin)
+    return out
 
 
 def virtual_hosts(extra_domains: list[str]) -> list[dict]:
-    """Elenco dei virtual host con stato e certificato SSL."""
+    """Elenco dei virtual host con porte, reverse proxy, stato e certificato SSL."""
     domains = _discover_vhosts()
     for d in extra_domains:
         host, _, p = d.partition(":")
-        domains.setdefault(host, set()).add(int(p) if p else 443)
+        domains.setdefault(host, {"ports": set(), "proxies": []})["ports"].add(int(p) if p else 443)
     result = []
     for name in sorted(domains):
         if "." not in name or name.startswith("*"):
             continue
-        ports = sorted(domains[name])
+        if name.startswith(_SERVICE_SUBDOMAINS):  # mail./webmail./admin. = URL di servizio Virtualmin
+            continue
+        ports = sorted(domains[name]["ports"])
         entry = {"domain": name, "ports": ports, "active": True,
+                 "proxies": domains[name]["proxies"],
                  "ssl_valid": None, "ssl_days_left": None, "ssl_not_after": "", "issuer": "", "error": ""}
         if 443 in ports:
             c = _check_cert(name, 443)
