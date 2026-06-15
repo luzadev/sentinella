@@ -54,4 +54,7 @@ export const api = {
   deleteBackupJob: (id) => request(`/api/backups/jobs/${id}`, { method: "DELETE" }),
   runBackup: (id) => request(`/api/backups/jobs/${id}/run`, { method: "POST" }),
   backupRuns: () => request("/api/backups/runs"),
+  requestDiskScan: (id, path) => request(`/api/servers/${id}/disk-scan`, { method: "POST", body: { path } }),
+  getDiskScan: (id) => request(`/api/servers/${id}/disk-scan`),
+  deletePath: (id, path) => request(`/api/servers/${id}/delete-path`, { method: "POST", body: { path } }),
 };

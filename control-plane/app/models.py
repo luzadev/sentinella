@@ -40,6 +40,13 @@ class BackupStatus(str, Enum):
     failed = "failed"
 
 
+class DiskScanStatus(str, Enum):
+    pending = "pending"
+    running = "running"
+    done = "done"
+    failed = "failed"
+
+
 # ---------- Tables ----------
 
 class User(SQLModel, table=True):
@@ -151,4 +158,17 @@ class BackupRun(SQLModel, table=True):
     size_bytes: int = 0
     output: str = ""
     started_at: datetime = Field(default_factory=utcnow)
+    finished_at: Optional[datetime] = None
+
+
+class DiskScan(SQLModel, table=True):
+    """On-demand disk usage analysis of a path on a host (immediate children, sorted by size)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    server_id: int = Field(index=True, foreign_key="server.id")
+    path: str = "/"
+    status: str = DiskScanStatus.pending
+    # [{path, name, size_bytes, is_dir}] ordinato per size desc
+    entries: list = Field(default_factory=list, sa_column=Column(JSON))
+    error: str = ""
+    created_at: datetime = Field(default_factory=utcnow, index=True)
     finished_at: Optional[datetime] = None

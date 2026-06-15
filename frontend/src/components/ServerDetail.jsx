@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import { api } from "../api.js";
+import DiskAnalysis from "./DiskAnalysis.jsx";
 
 export default function ServerDetail({ serverId, onBack }) {
   const [metrics, setMetrics] = useState([]);
@@ -137,6 +138,8 @@ export default function ServerDetail({ serverId, onBack }) {
           </table>
         )}
       </div>
+
+      <DiskAnalysis serverId={serverId} />
 
       <div className="grid" style={{ marginBottom: 16, gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))" }}>
         <div className="card">

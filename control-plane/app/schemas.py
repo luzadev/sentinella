@@ -44,10 +44,16 @@ class CommandOut(BaseModel):
     command: str
 
 
+class DiskScanJob(BaseModel):
+    scan_id: int
+    path: str
+
+
 class HeartbeatResponse(BaseModel):
     server_id: int
     pending_actions: list[CommandOut] = []
     pending_backups: list[dict] = []
+    pending_disk_scans: list[DiskScanJob] = []
 
 
 class ActionResultIn(BaseModel):
@@ -98,3 +104,17 @@ class ManualActionIn(BaseModel):
     command: str
     kind: str = "shell"
     risk: str = "medium"
+
+
+class DiskScanRequestIn(BaseModel):
+    path: str = "/"
+
+
+class DiskScanResultIn(BaseModel):
+    scan_id: int
+    entries: list = []
+    error: str = ""
+
+
+class DeletePathIn(BaseModel):
+    path: str

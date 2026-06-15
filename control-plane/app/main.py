@@ -12,7 +12,7 @@ from sqlmodel import Session
 from . import telegram
 from .auth import ensure_bootstrap_admin
 from .database import engine, init_db
-from .routers import actions, agents, alerts, auth, backups, servers
+from .routers import actions, agents, alerts, auth, backups, disk, servers
 from .scheduler import check_offline_servers, queue_due_backups
 from .seed import seed_default_rules
 
@@ -51,7 +51,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-for r in (auth.router, agents.router, servers.router, alerts.router, actions.router, backups.router):
+for r in (auth.router, agents.router, servers.router, alerts.router, actions.router, backups.router, disk.router):
     app.include_router(r)
 
 

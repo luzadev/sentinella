@@ -393,6 +393,93 @@ def run_backup(spec: dict) -> dict:
     }
 
 
+# Percorsi di sistema mai cancellabili dall'agent (rete di sicurezza lato host)
+_PROTECTED_PATHS = {
+    "/", "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/proc", "/root",
+    "/run", "/sbin", "/sys", "/usr", "/var", "/home", "/opt", "/srv",
+}
+
+
+def analyze_disk(path: str, top: int = 100, budget_seconds: int = 120) -> dict:
+    """Occupazione disco dei figli immediati di `path`, ordinati dal più grande.
+
+    Calcolo in Python puro (portabile, indipendente dai flag di `du`); i path non
+    leggibili vengono saltati e c'è un budget di tempo per non bloccare gli heartbeat.
+    """
+    target = os.path.realpath(path or "/")
+    if not os.path.isdir(target):
+        return {"entries": [], "error": f"Percorso non valido o non è una cartella: {target}"}
+
+    deadline = time.time() + budget_seconds
+    truncated = {"v": False}
+
+    def tree_size(p: str) -> int:
+        total = 0
+        for root, _dirs, files in os.walk(p, onerror=lambda e: None):
+            if time.time() > deadline:
+                truncated["v"] = True
+                break
+            for f in files:
+                try:
+                    total += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    pass
+        return total
+
+    entries = []
+    try:
+        with os.scandir(target) as it:
+            for de in it:
+                try:
+                    is_dir = de.is_dir(follow_symlinks=False)
+                    if de.is_symlink():
+                        size = 0
+                    elif is_dir:
+                        size = tree_size(de.path)
+                    else:
+                        size = de.stat(follow_symlinks=False).st_size
+                except OSError:
+                    size, is_dir = 0, False
+                entries.append({"path": de.path, "name": de.name, "size_bytes": size, "is_dir": is_dir})
+                if time.time() > deadline:
+                    truncated["v"] = True
+                    break
+    except OSError as e:
+        return {"entries": [], "error": str(e)}
+
+    entries.sort(key=lambda x: x["size_bytes"], reverse=True)
+    err = ""
+    if truncated["v"]:
+        err = "Analisi parziale (limite di tempo raggiunto): alcune dimensioni potrebbero essere incomplete."
+    elif not entries:
+        err = "Nessuna voce leggibile in questo percorso"
+    return {"entries": entries[:top], "error": err}
+
+
+def safe_delete(path: str) -> tuple[int, str]:
+    """Cancella un file/cartella, rifiutando i percorsi di sistema protetti."""
+    target = os.path.realpath(path or "")
+    if not target.startswith("/") or target in _PROTECTED_PATHS or target == os.path.realpath(os.path.expanduser("~")):
+        return 1, f"Rifiutato: '{target}' è un percorso protetto"
+    if not os.path.lexists(target):
+        return 1, f"Percorso inesistente: {target}"
+    try:
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target)
+        else:
+            os.remove(target)
+        return 0, f"Rimosso: {target}"
+    except Exception as e:  # noqa: BLE001
+        return 1, f"Errore eliminazione: {e}"
+
+
+def execute_action(action: dict) -> tuple[int, str]:
+    """Esegue un'azione approvata in base al tipo."""
+    if action.get("kind") == "delete_path":
+        return safe_delete(action["command"])
+    return run_command(action["command"])
+
+
 def heartbeat_loop(cfg: Config, token: str) -> None:
     headers = {"X-Agent-Token": token}
     client = httpx.Client(base_url=cfg.url, headers=headers, timeout=30)
@@ -405,8 +492,8 @@ def heartbeat_loop(cfg: Config, token: str) -> None:
             data = resp.json()
 
             for action in data.get("pending_actions", []):
-                log(f"Eseguo azione #{action['id']}: {action['command']}")
-                code, output = run_command(action["command"])
+                log(f"Eseguo azione #{action['id']} ({action.get('kind')}): {action['command']}")
+                code, output = execute_action(action)
                 client.post(
                     f"/api/agents/actions/{action['id']}/result",
                     json={"status": "done" if code == 0 else "failed",
@@ -417,6 +504,11 @@ def heartbeat_loop(cfg: Config, token: str) -> None:
                 log(f"Eseguo backup run #{backup['run_id']} ({backup.get('name')})")
                 result = run_backup(backup)
                 client.post("/api/agents/backups/result", json={"run_id": backup["run_id"], **result})
+
+            for scan in data.get("pending_disk_scans", []):
+                log(f"Analisi disco #{scan['scan_id']}: {scan['path']}")
+                result = analyze_disk(scan["path"])
+                client.post("/api/agents/disk-scan/result", json={"scan_id": scan["scan_id"], **result})
 
         except httpx.HTTPError as e:
             log(f"Heartbeat errore: {e}")

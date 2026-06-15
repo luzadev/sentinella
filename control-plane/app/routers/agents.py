@@ -9,10 +9,11 @@ from ..alert_engine import evaluate
 from ..config import settings
 from ..database import get_session
 from ..deps import get_agent_server
-from ..models import (Action, ActionStatus, BackupRun, BackupStatus, Metric,
-                      Server, utcnow)
-from ..schemas import (ActionResultIn, BackupResultIn, CommandOut, EnrollRequest,
-                       EnrollResponse, HeartbeatRequest, HeartbeatResponse)
+from ..models import (Action, ActionStatus, BackupRun, BackupStatus, DiskScan,
+                      DiskScanStatus, Metric, Server, utcnow)
+from ..schemas import (ActionResultIn, BackupResultIn, CommandOut, DiskScanJob,
+                       DiskScanResultIn, EnrollRequest, EnrollResponse,
+                       HeartbeatRequest, HeartbeatResponse)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -101,9 +102,20 @@ async def heartbeat(
             "name": job.name if job else "backup",
             "retention": job.retention if job else 7,
         })
+    scans = session.exec(
+        select(DiskScan).where(DiskScan.server_id == server_id, DiskScan.status == DiskScanStatus.pending)
+    ).all()
+    scans_out = []
+    for sc in scans:
+        sc.status = DiskScanStatus.running
+        session.add(sc)
+        scans_out.append(DiskScanJob(scan_id=sc.id, path=sc.path))
     session.commit()
 
-    return HeartbeatResponse(server_id=server_id, pending_actions=actions_out, pending_backups=backups_out)
+    return HeartbeatResponse(
+        server_id=server_id, pending_actions=actions_out,
+        pending_backups=backups_out, pending_disk_scans=scans_out,
+    )
 
 
 @router.post("/actions/{action_id}/result")
@@ -120,6 +132,24 @@ def action_result(
     action.output = res.output
     action.exit_code = res.exit_code
     session.add(action)
+    session.commit()
+    return {"ok": True}
+
+
+@router.post("/disk-scan/result")
+def disk_scan_result(
+    res: DiskScanResultIn,
+    server: Server = Depends(get_agent_server),
+    session: Session = Depends(get_session),
+):
+    scan = session.get(DiskScan, res.scan_id)
+    if not scan or scan.server_id != server.id:
+        raise HTTPException(status_code=404, detail="Scansione non trovata")
+    scan.entries = res.entries
+    scan.error = res.error
+    scan.status = DiskScanStatus.failed if res.error and not res.entries else DiskScanStatus.done
+    scan.finished_at = utcnow()
+    session.add(scan)
     session.commit()
     return {"ok": True}
 
