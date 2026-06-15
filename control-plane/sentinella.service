@@ -1,0 +1,21 @@
+[Unit]
+Description=Sentinella Control Plane (FastAPI)
+After=network-online.target mariadb.service mysql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# I placeholder vengono sostituiti da deploy/install.sh
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__/control-plane
+# pydantic carica automaticamente control-plane/.env dalla WorkingDirectory
+ExecStart=__APP_DIR__/control-plane/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port __PORT__
+Restart=always
+RestartSec=5
+# Hardening minimo
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -20,6 +20,8 @@ control-plane/static/
 
 # Agent state
 agent.json
+agent-state.json
+agent/agent.env
 
 # OS
 .DS_Store
